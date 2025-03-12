@@ -3,11 +3,16 @@ package main
 import (
 	"log"
 	"net/rpc"
+	"fmt"
 )
 
 type Args struct {}
 
 func main() {
+
+	longstring := "aliwyegfliajshdfljhabsdflhkbasdlfbsjlhdfbljhasdbfkjasbdflbasdfbajlhsdbfjlhabsdfjkhbasdjbfh"
+	mini := longstring[0:30]
+	fmt.Println(mini)
 	// Address to this variable will be sent to the RPC server 
 	// Type of reply should be same as that specified on server 
 	var reply int64 

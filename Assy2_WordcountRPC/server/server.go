@@ -6,13 +6,18 @@ import (
 	"net/http"
 	"net/rpc"
 	"log"
+	"fmt"
 )
 
 type Args struct {}
 
-type TimeServer int64 
+type TimeServer map[string]int 
 
 func main() {
+
+	longstring = "aliwyegfliajshdfljhabsdflhkbasdlfbsjlhdfbljhasdbfkjasbdflbasdfbajlhsdbfjlhabsdfjkhbasdjbfh"
+	mini = longstring[0:15]
+	fmt.Println(mini)
 	timeserver := new(TimeServer)
 	// Register the timeserver object upon which the GiveServerTime 
 	// function will be called from the RPC server (from the client)
@@ -32,6 +37,8 @@ func main() {
 
 func (t *TimeServer) GiveServerTime(args *Args, reply *int64) error {
 	// Set the value at the pointer got from the client 
-	*reply = time.Now().Unix()
+	hello := new(map[string]int)
+	
+	*reply = new(hello)
 	return nil
 }

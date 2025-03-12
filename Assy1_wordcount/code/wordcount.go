@@ -103,7 +103,7 @@ func multi_threaded(files []string) {
 		totalBytes += n_bytes
 	}
 
-	// fmt.Printf("Sorted %d words\n", len(keys))
+	fmt.Printf("Sorted %d words\n", len(keys))
 
 	f.Sync()
 
