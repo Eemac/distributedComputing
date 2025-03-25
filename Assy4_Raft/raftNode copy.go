@@ -55,14 +55,16 @@ var logEntries []int
 var votedFor = -1
 
 func (*RaftNode) MonitorNodeTimeout() error {
-	time.Sleep(time.Millisecond * 10)
-	<-node.electionTimeout.C
-	if node.state != 2 {
-		LeaderElection()
-	}
+	for {
+		fmt.Printf("statef: %d", node.state)
+		<-node.electionTimeout.C
+		if node.state != 2 {
+			LeaderElection()
+		}
 
-	fmt.Printf("state: %d", node.state)
-	node.resetElectionTimeout()
+		fmt.Printf("state: %d", node.state)
+		// node.resetElectionTimeout()
+	}
 	return nil
 }
 
@@ -115,17 +117,7 @@ func LeaderElection() {
 	node.state = 1
 	//unlock mutex
 
-	votes := 1
-
 	//wait group?
-
-	for _, peer := range serverNodes {
-
-	}
-	if votes > len(serverNodes)/2 {
-		//I am the leader
-		Heartbeat()
-	}
 }
 
 // You may use this function to help with handling the periodic heartbeats
