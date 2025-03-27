@@ -196,7 +196,6 @@ func (*RaftNode) resetElectionTimeout() {
 
 func main() {
 	var wg sync.WaitGroup
-	wg.Add(1)
 	// The assumption here is that the command line arguments will contain:
 	// This server's ID (zero-based), location and name of the cluster configuration file
 	arguments := os.Args
@@ -289,6 +288,7 @@ func main() {
 	node.votes = 0
 	//Set timeout to be some time in the future
 	node.resetElectionTimeout()
+	wg.Add(1)
 	go node.MonitorNodeTimeout()
 
 	wg.Wait()
