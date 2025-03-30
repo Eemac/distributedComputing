@@ -1,3 +1,4 @@
+// Sophie and Ian
 package main
 
 import (
@@ -57,20 +58,19 @@ var node RaftNode
 var logEntries []int
 var votedFor = -1
 
+// This function monitors the timeout from heartbeats and restarts an election if need be
 func (*RaftNode) MonitorNodeTimeout() error {
 	for {
 		<-node.electionTimeout.C
 
 		fmt.Printf("state %d", node.state)
-		if node.state != 2 {
-			LeaderElection()
-		}
-
+		votedFor = -1
+		LeaderElection()
 		node.resetElectionTimeout()
 	}
-	return nil
 }
 
+// check if log is as up-to-date/node can be a follower of want-to-be leader
 func logCheck(lastLogIndex int, lastLogTerm int) bool {
 	if len(logEntries) == 0 {
 		return true
@@ -84,7 +84,9 @@ func logCheck(lastLogIndex int, lastLogTerm int) bool {
 // Hint 1: Use the description in Figure 2 of the paper
 // Hint 2: Only focus on the details related to leader election and majority votes
 func (*RaftNode) RequestVote(arguments VoteArguments, reply *VoteReply) error {
-	//add mutex
+	node.mutex.Lock()
+	defer node.mutex.Unlock()
+
 	if arguments.Term < currentTerm {
 		reply.Term = currentTerm
 		reply.ResultVote = false
@@ -108,6 +110,9 @@ func (*RaftNode) RequestVote(arguments VoteArguments, reply *VoteReply) error {
 // Hint 2: Only focus on the details related to leader election and heartbeats
 func (*RaftNode) AppendEntry(arguments AppendEntryArgument, reply *AppendEntryReply) error {
 	node.resetElectionTimeout()
+	node.mutex.Lock()
+	node.state = 0
+	node.mutex.Unlock()
 	fmt.Println("heartbeat received")
 
 	return nil
@@ -116,14 +121,17 @@ func (*RaftNode) AppendEntry(arguments AppendEntryArgument, reply *AppendEntryRe
 // You may use this function to help with handling the election time out
 // Hint: It may be helpful to call this method every time the node wants to start an election
 func LeaderElection() {
-	var wg sync.WaitGroup
+	node.mutex.Lock()
 	currentTerm++
 	votedFor = node.selfID
+	//reset election timeout
+	node.resetElectionTimeout()
+
 	//Node is a candidate now
 	node.state = 1
 	node.votes = 1
+	node.mutex.Unlock()
 
-	//wait group?
 	//Create vote arguments
 	lastLogIndex := len(logEntries) - 1
 	voteArgs := VoteArguments{currentTerm, node.selfID, lastLogIndex, 0}
@@ -133,10 +141,8 @@ func LeaderElection() {
 
 	//actually send the vote requests
 	for _, peer := range serverNodes {
-		wg.Add(1)
-		go func(connection ServerConnection, arguments VoteArguments, wg *sync.WaitGroup, node *RaftNode) {
-			defer wg.Done()
-			var ackReply *VoteReply
+		go func(connection ServerConnection, arguments VoteArguments, node *RaftNode) {
+			var ackReply VoteReply
 			fmt.Println("before")
 			err := connection.rpcConnection.Call("RaftNode.RequestVote", &arguments, &ackReply)
 			if err != nil {
@@ -151,30 +157,55 @@ func LeaderElection() {
 			}
 			node.mutex.Unlock()
 
-		}(peer, voteArgs, &wg, &node)
+		}(peer, voteArgs, &node)
 	}
 
 	//Wait until the peers respond
-	wg.Wait()
+	<-node.electionTimeout.C
 
 	fmt.Println(node.votes)
-
+	node.mutex.Lock()
 	if node.votes > len(serverNodes)/2 {
 		node.state = 2
 		//I am the leader
+		node.mutex.Unlock()
 		go Heartbeat()
 	} else {
 		node.state = 0
+		votedFor = -1
+		node.mutex.Unlock()
 	}
 }
 
 // You may use this function to help with handling the periodic heartbeats
 // Hint: Use this only if the node is a leader
 func Heartbeat() {
+
 	for node.state == 2 {
 		r := rand.New(rand.NewSource(time.Now().UnixNano()))
 		time.Sleep(time.Duration(r.Intn(37)+37) * time.Millisecond)
-		node.resetElectionTimeout()
+
+		var wg sync.WaitGroup
+
+		for _, peer := range serverNodes {
+			wg.Add(1)
+			go func(connection ServerConnection, wg *sync.WaitGroup, node *RaftNode) {
+				defer wg.Done()
+				arguments := AppendEntryArgument{currentTerm, node.selfID}
+				var ackReply AppendEntryReply
+				fmt.Println("sending heartbeat")
+				err := connection.rpcConnection.Call("RaftNode.AppendEntry", &arguments, &ackReply)
+				if err != nil {
+					fmt.Println("heartbeat NOT received")
+					return
+				} else {
+					fmt.Println("heartbeat received")
+					node.resetElectionTimeout()
+				}
+
+			}(peer, &wg, &node)
+		}
+
 	}
 }
 

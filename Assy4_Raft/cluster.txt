@@ -1,2 +1,4 @@
-localhost:4042
-localhost:4043
+localhost:4047
+localhost:4048
+localhost:4049
+localhost:4051
