@@ -37,8 +37,12 @@ type VoteReply struct {
 }
 
 type AppendEntryArgument struct {
-	Term     int
-	LeaderID int
+	Term         int
+	LeaderID     int
+	PrevLogIndex int
+	PrevLogTerm  int
+	Entries      []LogEntry
+	LeaderCommit int
 }
 
 type AppendEntryReply struct {
@@ -52,19 +56,27 @@ type ServerConnection struct {
 	rpcConnection *rpc.Client
 }
 
+type LogEntry struct {
+	Index int
+	Term  int
+	Data  int
+}
+
+var lastAppliedIndex = 0
 var serverNodes []ServerConnection
 var currentTerm int
 var node RaftNode
-var logEntries []int
+var logEntries []LogEntry
+var commitIndex int
+var lastIndex int
 var votedFor = -1
 var started = 0
+var states = [3]string{"Follower", "Candidate", "Leader"}
 
 // This function monitors the timeout from heartbeats and restarts an election if need be
 func (*RaftNode) MonitorNodeTimeout() error {
 	for {
 		<-node.electionTimeout.C
-
-		fmt.Printf("state %d", node.state)
 		votedFor = -1
 		LeaderElection()
 		node.resetElectionTimeout()
@@ -77,7 +89,7 @@ func logCheck(lastLogIndex int, lastLogTerm int) bool {
 		return true
 	}
 	myLastLogIndex := len(logEntries) - 1
-	myLastLogTerm := logEntries[myLastLogIndex]
+	myLastLogTerm := logEntries[myLastLogIndex].Term
 	return lastLogTerm > myLastLogTerm || (lastLogTerm == myLastLogTerm && lastLogIndex >= myLastLogIndex)
 }
 
@@ -85,25 +97,28 @@ func logCheck(lastLogIndex int, lastLogTerm int) bool {
 // Hint 1: Use the description in Figure 2 of the paper
 // Hint 2: Only focus on the details related to leader election and majority votes
 func (*RaftNode) RequestVote(arguments VoteArguments, reply *VoteReply) error {
-	node.mutex.Lock()
-	defer node.mutex.Unlock()
+	if started == 1 {
+		node.resetElectionTimeout()
+		node.mutex.Lock()
+		defer node.mutex.Unlock()
 
-	if arguments.Term < currentTerm {
+		if arguments.Term < currentTerm {
+			reply.Term = currentTerm
+			reply.ResultVote = false
+			return nil
+		}
+
+		if (votedFor == -1 || votedFor == arguments.CandidateID) && logCheck(arguments.LastLogIndex, arguments.LastLogTerm) {
+			votedFor = arguments.CandidateID
+			currentTerm = arguments.Term
+			reply.Term = currentTerm
+			reply.ResultVote = true
+			return nil
+		}
 		reply.Term = currentTerm
 		reply.ResultVote = false
-		return nil
 	}
 
-	if (votedFor == -1 || votedFor == arguments.CandidateID) && logCheck(arguments.LastLogIndex, arguments.LastLogTerm) {
-		votedFor = arguments.CandidateID
-		currentTerm = arguments.Term
-		reply.Term = currentTerm
-		reply.ResultVote = true
-		node.resetElectionTimeout()
-		return nil
-	}
-	reply.Term = currentTerm
-	reply.ResultVote = false
 	return nil
 }
 
@@ -111,11 +126,72 @@ func (*RaftNode) RequestVote(arguments VoteArguments, reply *VoteReply) error {
 // Hint 1: Use the description in Figure 2 of the paper
 // Hint 2: Only focus on the details related to leader election and heartbeats
 func (*RaftNode) AppendEntry(arguments AppendEntryArgument, reply *AppendEntryReply) error {
-	node.resetElectionTimeout()
-	node.mutex.Lock()
-	node.state = 0
-	node.mutex.Unlock()
+	if started == 1 {
 
+		// return nil
+		node.mutex.Lock()
+		defer node.mutex.Unlock()
+
+		if arguments.Term < currentTerm {
+			reply.Term = currentTerm
+			reply.Success = false
+			return nil
+		}
+		node.resetElectionTimeout()
+		currentTerm = arguments.Term
+		node.state = 0
+		reply.Term = currentTerm
+
+		//If there are entries:
+		if len(logEntries) > 0 && len(logEntries)-1 >= arguments.PrevLogIndex {
+			if logEntries[arguments.PrevLogIndex].Term != arguments.PrevLogTerm {
+				reply.Success = false
+				fmt.Println("hehre")
+				return nil
+			}
+		}
+
+		//IF there are logs...
+		if len(logEntries) > 0 && arguments.PrevLogIndex >= 0 {
+			//delete conflicting logs
+			for i, entry := range arguments.Entries {
+				//gets the index for the current entry
+				for j, nEnt := range logEntries {
+					if nEnt.Data == entry.Data && nEnt.Index == entry.Index && nEnt.Term == entry.Term {
+						logEntries = logEntries[:j]
+						break
+					}
+				}
+				logIndex := arguments.PrevLogIndex + i
+
+				if logIndex+1 < len(logEntries) {
+					if logEntries[logIndex].Term > entry.Term {
+						logEntries = logEntries[1:logIndex]
+						break
+					}
+				}
+			}
+		}
+
+		//add any new log entries
+		for i, entry := range arguments.Entries {
+			logIndex := arguments.PrevLogIndex + i
+			if logIndex >= len(logEntries) {
+				logEntries = append(logEntries, entry)
+			}
+		}
+
+		if arguments.LeaderCommit > commitIndex {
+			lastNewIndex := arguments.PrevLogIndex + len(arguments.Entries)
+			if lastNewIndex < len(logEntries) {
+				commitIndex = lastNewIndex
+			} else {
+				commitIndex = arguments.LeaderCommit
+			}
+		}
+
+		reply.Success = true
+	}
 	return nil
 }
 
@@ -124,6 +200,7 @@ func (*RaftNode) AppendEntry(arguments AppendEntryArgument, reply *AppendEntryRe
 func LeaderElection() {
 	node.mutex.Lock()
 	currentTerm++
+	var termMax = 0
 	votedFor = node.selfID
 	//reset election timeout
 	node.resetElectionTimeout()
@@ -137,7 +214,7 @@ func LeaderElection() {
 	lastLogIndex := len(logEntries) - 1
 	voteArgs := VoteArguments{currentTerm, node.selfID, lastLogIndex, 0}
 	if lastLogIndex != -1 {
-		voteArgs.LastLogTerm = logEntries[len(logEntries)-1]
+		voteArgs.LastLogTerm = logEntries[len(logEntries)-1].Term
 	}
 
 	//actually send the vote requests
@@ -146,13 +223,22 @@ func LeaderElection() {
 			var ackReply VoteReply
 			err := connection.rpcConnection.Call("RaftNode.RequestVote", &arguments, &ackReply)
 			if err != nil {
-				fmt.Println(err)
+				// fmt.Println(err)
 				return
 			}
-			//update votes count
+			//update votes count and term max
 			node.mutex.Lock()
+
+			termMax = max(termMax, ackReply.Term)
+
 			if ackReply.ResultVote {
 				node.votes++
+			}
+
+			if node.votes > len(serverNodes)/2 && termMax <= currentTerm {
+				node.state = 2
+				//I am the leader
+				go Heartbeat()
 			}
 			node.mutex.Unlock()
 
@@ -162,9 +248,8 @@ func LeaderElection() {
 	//Wait until the peers respond
 	<-node.electionTimeout.C
 
-	fmt.Println(node.votes)
 	node.mutex.Lock()
-	if node.votes > len(serverNodes)/2 {
+	if node.votes > len(serverNodes)/2 && termMax < currentTerm {
 		node.state = 2
 		//I am the leader
 		node.mutex.Unlock()
@@ -172,8 +257,12 @@ func LeaderElection() {
 	} else {
 		node.state = 0
 		votedFor = -1
+		currentTerm = termMax
 		node.mutex.Unlock()
 	}
+
+	fmt.Print("Process is a: ")
+	fmt.Println(states[node.state])
 }
 
 // You may use this function to help with handling the periodic heartbeats
@@ -184,13 +273,31 @@ func Heartbeat() {
 		r := rand.New(rand.NewSource(time.Now().UnixNano()))
 		time.Sleep(time.Duration(r.Intn(37)+37) * time.Millisecond)
 
+		lastLogIndex := len(logEntries) - 1
+		prevLogIndex := lastLogIndex
+		prevLogTerm := 0
+
+		if prevLogIndex >= 0 {
+			prevLogTerm = logEntries[prevLogIndex].Term
+		}
+
+		entries := []LogEntry{}
+		leaderCommit := commitIndex
+
 		var wg sync.WaitGroup
 
 		for _, peer := range serverNodes {
 			wg.Add(1)
 			go func(connection ServerConnection, wg *sync.WaitGroup, node *RaftNode) {
 				defer wg.Done()
-				arguments := AppendEntryArgument{currentTerm, node.selfID}
+				arguments := AppendEntryArgument{
+					Term:         currentTerm,
+					LeaderID:     node.selfID,
+					PrevLogIndex: prevLogIndex,
+					PrevLogTerm:  prevLogTerm,
+					Entries:      entries,
+					LeaderCommit: leaderCommit,
+				}
 				var ackReply AppendEntryReply
 				err := connection.rpcConnection.Call("RaftNode.AppendEntry", &arguments, &ackReply)
 				if err != nil {
@@ -219,6 +326,76 @@ func (*RaftNode) resetElectionTimeout() {
 
 	node.electionTimeout.Stop()          // Use Reset method only on stopped or expired timers
 	node.electionTimeout.Reset(duration) // Resets the timer to new random value
+}
+
+func ClientAddToLog() {
+	var wg sync.WaitGroup
+	for {
+		time.Sleep(time.Second)
+		fmt.Print("Log: ")
+		fmt.Println(logEntries)
+		// fmt.Print("Term: ")
+		// log.Println(currentTerm)
+
+		if node.state == 2 {
+
+			lastLogIndex := len(logEntries) - 1
+			prevLogIndex := lastLogIndex
+			prevLogTerm := 0
+
+			if prevLogIndex >= 0 {
+				prevLogTerm = logEntries[prevLogIndex].Term
+			}
+
+			leaderCommit := commitIndex
+			var entries = []LogEntry{
+				{
+					Index: len(logEntries),
+					Term:  currentTerm,
+					Data:  node.selfID,
+				},
+			}
+
+			logEntries = append(logEntries, entries[0])
+
+			var numVotes = 0
+
+			// lastAppliedIndex here is an int variable that is needed by a node to store the value of the last index it used in the log
+			log.Println("Leader log add idx: " + strconv.Itoa(entries[0].Index))
+			// Add rest of logic here
+
+			// HINT 1: using the AppendEntry RPC might happen here
+			for _, peer := range serverNodes {
+				wg.Add(1)
+				go func(connection ServerConnection, wg *sync.WaitGroup, node *RaftNode) {
+					defer wg.Done()
+					arguments := AppendEntryArgument{
+						Term:         currentTerm,
+						LeaderID:     node.selfID,
+						PrevLogIndex: prevLogIndex,
+						PrevLogTerm:  prevLogTerm,
+						Entries:      logEntries[commitIndex:],
+						LeaderCommit: leaderCommit,
+					}
+					var ackReply AppendEntryReply
+					err := connection.rpcConnection.Call("RaftNode.AppendEntry", &arguments, &ackReply)
+
+					if err != nil {
+						return
+					} else {
+						if ackReply.Success {
+							numVotes++
+						}
+						node.resetElectionTimeout()
+					}
+
+				}(peer, &wg, &node)
+			}
+			if numVotes > len(serverNodes)/2 {
+				commitIndex = len(logEntries)
+			}
+		}
+	}
 }
 
 func main() {
@@ -316,8 +493,10 @@ func main() {
 	node.votes = 0
 	//Set timeout to be some time in the future
 	node.resetElectionTimeout()
-	wg.Add(1)
+	wg.Add(2)
 	go node.MonitorNodeTimeout()
+	//Once every second, add a log if leader
+	go ClientAddToLog()
 
 	wg.Wait()
 

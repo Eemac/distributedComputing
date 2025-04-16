@@ -2,3 +2,4 @@ localhost:4047
 localhost:4048
 localhost:4049
 localhost:4051
+localhost:4052
